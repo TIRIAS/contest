@@ -1,0 +1,74 @@
+# 📌 1. 라이브러리 설치
+!pip install transformers tqdm scikit-learn
+
+# 📌 2. 라이브러리 불러오기
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from transformers import AutoTokenizer, AutoModel
+import torch
+
+# 📌 3. GPU 설정
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# 📌 4. 데이터 불러오기
+train_df = pd.read_csv("train.csv")
+test_df = pd.read_csv("test.csv")  # title, paragraph_index, paragraph 있음
+
+# 📌 5. 문단 분리 함수
+def split_into_paragraphs(text):
+    paragraphs = [p.strip() for p in text.split('\n') if len(p.strip()) > 10]
+    return paragraphs
+
+train_paragraphs = []
+train_labels = []
+
+for _, row in tqdm(train_df.iterrows(), total=len(train_df)):
+    paragraphs = split_into_paragraphs(row['full_text'])
+    for p in paragraphs:
+        train_paragraphs.append(p)
+        train_labels.append(row['generated'])  # 전체 글의 라벨을 문단에도 동일하게 부여
+
+# 📌 6. Tokenizer 및 모델 로드 (KLUE RoBERTa)
+model_name = "klue/roberta-base"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name).to(device)
+model.eval()
+
+# 📌 7. 문단 임베딩 함수 (CLS 토큰 사용)
+def get_embedding(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
+    return outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()  # CLS token
+
+# 📌 8. 문단 임베딩 추출
+train_embeddings = []
+for text in tqdm(train_paragraphs):
+    emb = get_embedding(text)
+    train_embeddings.append(emb)
+
+X = np.array(train_embeddings)
+y = np.array(train_labels)
+
+# 📌 9. 분류기 학습
+clf = LogisticRegression(max_iter=1000)
+clf.fit(X, y)
+
+# 📌 10. 테스트 문단 임베딩
+test_paragraphs = test_df['paragraph'].tolist()
+test_embeddings = [get_embedding(p) for p in tqdm(test_paragraphs)]
+X_test = np.array(test_embeddings)
+
+# 📌 11. 예측 및 저장
+probs = clf.predict_proba(X_test)[:, 1]  # AI일 확률
+
+submission = pd.read_csv("sample_submission.csv")
+submission['prob'] = probs
+submission.to_csv("submission.csv", index=False)
+
+print("✅ submission.csv 저장 완료")
